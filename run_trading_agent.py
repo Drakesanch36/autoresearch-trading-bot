@@ -6,9 +6,11 @@ import datetime as dt
 import json
 import os
 import re
+import smtplib
 import subprocess
 import time
 from dataclasses import dataclass
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -247,6 +249,32 @@ def send_slack(webhook: str, message: str) -> None:
         pass
 
 
+def send_email_summary(message: str) -> None:
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "").strip()
+    smtp_pass = os.getenv("SMTP_PASS", "").strip()
+    email_to = os.getenv("SUMMARY_EMAIL_TO", "").strip()
+    email_from = os.getenv("SUMMARY_EMAIL_FROM", smtp_user).strip()
+
+    if not smtp_host or not email_to or not email_from:
+        return
+
+    msg = MIMEText(message, "plain", "utf-8")
+    msg["Subject"] = "Autoresearch Trading Daily Summary"
+    msg["From"] = email_from
+    msg["To"] = email_to
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            server.starttls()
+            if smtp_user:
+                server.login(smtp_user, smtp_pass)
+            server.sendmail(email_from, [email_to], msg.as_string())
+    except Exception:
+        pass
+
+
 def build_prompt(program_md: str, current_strategy: str, metrics: Dict[str, float], iteration: int) -> str:
     return f"""
 You are editing strategy.py for autonomous trading research.
@@ -432,7 +460,9 @@ def main() -> None:
 
         now_day = dt.datetime.now(dt.timezone.utc).date()
         if now_day != current_day:
-            send_slack(webhook, summarize_last_day(daily_rows))
+            summary = summarize_last_day(daily_rows)
+            send_slack(webhook, summary)
+            send_email_summary(summary)
             daily_rows = []
             current_day = now_day
 
@@ -442,7 +472,9 @@ def main() -> None:
         iteration += 1
         time.sleep(max(args.sleep_seconds, 0.0))
 
-    send_slack(webhook, summarize_last_day(daily_rows))
+    summary = summarize_last_day(daily_rows)
+    send_slack(webhook, summary)
+    send_email_summary(summary)
 
 
 if __name__ == "__main__":
