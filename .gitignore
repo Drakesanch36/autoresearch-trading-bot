@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Secrets
+.env
+
+# Runtime outputs
+logs/
+metrics/*.json
+!metrics/.gitkeep
+
+# Market data cache
+*.parquet
+*.csv
+*.feather
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Keep results.tsv under version control for leaderboard history

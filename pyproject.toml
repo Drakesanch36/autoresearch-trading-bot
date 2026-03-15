@@ -1,0 +1,27 @@
+[project]
+name = "autoresearch-trading-bot"
+version = "0.1.0"
+description = "Autonomous strategy search and walk-forward validation for quant trading"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "alpaca-py>=0.42.0",
+  "ccxt>=4.5.8",
+  "numpy>=2.2.4",
+  "pandas>=2.2.3",
+  "pyarrow>=19.0.1",
+  "pytest>=8.3.5",
+  "python-dotenv>=1.0.1",
+  "requests>=2.32.3",
+  "TA-Lib>=0.4.32",
+  "vectorbt>=0.28.1",
+  "yfinance>=0.2.55",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
