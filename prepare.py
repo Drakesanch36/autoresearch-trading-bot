@@ -42,6 +42,8 @@ def normalize_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
     }
     work = work.rename(columns=rename_map)
     work.columns = [str(c).lower() for c in work.columns]
+    # yfinance can expose both Adj Close and Close, which collide after rename.
+    work = work.loc[:, ~pd.Index(work.columns).duplicated(keep="last")]
 
     if "timestamp" in work.columns:
         work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True)

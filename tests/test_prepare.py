@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from prepare import clean_ohlcv, compute_features, save_splits, split_walk_forward
+from prepare import clean_ohlcv, compute_features, normalize_ohlcv_columns, save_splits, split_walk_forward
 
 
 def make_ohlcv(rows: int = 240) -> pd.DataFrame:
@@ -31,6 +31,77 @@ def test_clean_ohlcv_normalizes_columns() -> None:
     assert list(clean.columns) == ["open", "high", "low", "close", "volume"]
     assert isinstance(clean.index, pd.DatetimeIndex)
     assert clean.index.is_monotonic_increasing
+
+
+def test_normalize_ohlcv_columns_deduplicates_yfinance_close_columns() -> None:
+    idx = pd.date_range("2020-01-01", periods=120, freq="D", tz="UTC")
+    columns = pd.MultiIndex.from_tuples(
+        [
+            ("Adj Close", "SPY"),
+            ("Close", "SPY"),
+            ("High", "SPY"),
+            ("Low", "SPY"),
+            ("Open", "SPY"),
+            ("Volume", "SPY"),
+        ],
+        names=["Price", "Ticker"],
+    )
+    raw = pd.DataFrame(
+        np.column_stack(
+            [
+                np.linspace(90.0, 95.0, len(idx)),
+                np.linspace(100.0, 110.0, len(idx)),
+                np.linspace(101.0, 111.0, len(idx)),
+                np.linspace(99.0, 109.0, len(idx)),
+                np.linspace(99.5, 109.5, len(idx)),
+                np.linspace(1_000_000, 1_100_000, len(idx)),
+            ]
+        ),
+        index=idx,
+        columns=columns,
+    )
+
+    normalized = normalize_ohlcv_columns(raw)
+
+    assert list(normalized.columns) == ["close", "high", "low", "open", "volume"]
+    assert isinstance(normalized["close"], pd.Series)
+    assert np.isclose(normalized["close"].iloc[0], 100.0)
+
+
+def test_compute_features_accepts_yfinance_style_adj_close_and_close() -> None:
+    idx = pd.date_range("2020-01-01", periods=160, freq="D", tz="UTC")
+    columns = pd.MultiIndex.from_tuples(
+        [
+            ("Adj Close", "SPY"),
+            ("Close", "SPY"),
+            ("High", "SPY"),
+            ("Low", "SPY"),
+            ("Open", "SPY"),
+            ("Volume", "SPY"),
+        ],
+        names=["Price", "Ticker"],
+    )
+    raw = pd.DataFrame(
+        np.column_stack(
+            [
+                np.linspace(90.0, 105.0, len(idx)),
+                np.linspace(100.0, 120.0, len(idx)),
+                np.linspace(101.0, 121.0, len(idx)),
+                np.linspace(99.0, 119.0, len(idx)),
+                np.linspace(99.5, 119.5, len(idx)),
+                np.linspace(1_000_000, 1_100_000, len(idx)),
+            ]
+        ),
+        index=idx,
+        columns=columns,
+    )
+
+    clean = clean_ohlcv(raw)
+    features = compute_features(clean)
+
+    assert "target_ret_1d" in features.columns
+    assert not features.empty
+    assert np.isclose(clean["close"].iloc[0], 100.0)
 
 
 def test_compute_features_has_target_and_no_nans() -> None:
