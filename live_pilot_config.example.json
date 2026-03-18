@@ -1,0 +1,11 @@
+{
+  "human_live_enable": false,
+  "min_offline_iterations": 30,
+  "min_offline_committed_improvements": 5,
+  "min_offline_active_days": 14,
+  "min_clean_paper_days": 10,
+  "max_daily_loss": 500.0,
+  "max_position_notional": 10000.0,
+  "stale_data_max_seconds": 300.0,
+  "broker_health_required": true
+}

@@ -10,6 +10,7 @@ REPO_URL="${1:-https://github.com/YOUR_GITHUB_USERNAME/autoresearch-trading-bot.
 INSTALL_DIR="${2:-/opt/autoresearch-trading-bot}"
 RUN_USER="${SUDO_USER:-root}"
 RUN_HOME="$(eval echo ~${RUN_USER})"
+ENV_FILE="${INSTALL_DIR}/.env"
 
 echo "[1/9] Installing OS dependencies (includes TA-Lib system library first)..."
 export DEBIAN_FRONTEND=noninteractive
@@ -76,7 +77,7 @@ fi
 
 if [[ ! -f results.tsv ]]; then
   cat > results.tsv <<'EOT'
-timestamp	provider	model	iteration	test_pass	sharpe	cagr	max_drawdown	objective	git_commit	notes
+timestamp	provider	model	iteration	test_pass	input_tokens	output_tokens	est_cost_usd	sharpe	cagr	max_drawdown	objective	git_commit	phase	phase_reason	notes
 EOT
   chown "${RUN_USER}":"${RUN_USER}" results.tsv
 fi
@@ -95,7 +96,7 @@ Wants=network-online.target
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${INSTALL_DIR}
-EnvironmentFile=${INSTALL_DIR}/.env
+EnvironmentFile=${ENV_FILE}
 ExecStart=${INSTALL_DIR}/.venv/bin/python ${INSTALL_DIR}/run_trading_agent.py --loop-forever --provider auto --model claude-3-7-sonnet-latest --fallback-model gpt-4.1-mini
 Restart=always
 RestartSec=10

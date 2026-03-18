@@ -1,0 +1,44 @@
+{
+  "best_params": {
+    "fast_window": 10,
+    "slow_window": 40
+  },
+  "selection_metrics": {
+    "fold_count": 3,
+    "worst_fold_result": 11.3814733877,
+    "median_fold_result": 13.7094039033,
+    "median_fold_score": 13.7094039033,
+    "lower_quartile_fold_score": 12.5454386455,
+    "worst_fold_drawdown": -0.0030649031,
+    "sharpe": 13.6228936727,
+    "cagr": 0.1730204613,
+    "max_drawdown": -0.0030649031,
+    "selection_score": 13.1274212744
+  },
+  "test_metrics": {
+    "total_return": 0.1008432803,
+    "cagr": 0.1439727885,
+    "annualized_volatility": 0.0099712586,
+    "sharpe": 13.4980640989,
+    "sortino": 37.8038625859,
+    "max_drawdown": -0.0026640397,
+    "calmar": 54.0430346426,
+    "win_rate": 0.5888888889,
+    "mean_abs_exposure": 1.0916666667,
+    "percent_active_days": 0.7277777778,
+    "turnover": 4.5,
+    "trade_count": 3,
+    "average_holding_period": 65.5,
+    "trades": 3,
+    "commission_cost": 0.0009,
+    "slippage_cost": 0.00225,
+    "total_cost": 0.00315
+  },
+  "walk_forward": {
+    "fold_count": 3,
+    "avg_test_sharpe": 12.0620752104,
+    "avg_test_cagr": 0.1359184178,
+    "worst_test_drawdown": -0.0036985898
+  },
+  "objective": 13.5700504931
+}
