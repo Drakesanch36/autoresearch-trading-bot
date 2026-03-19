@@ -6,18 +6,22 @@ from pathlib import Path
 import subprocess
 
 from run_trading_agent import (
+    ALPHA_MODE,
     EVOLVABLE_REGION_END,
     EVOLVABLE_REGION_START,
     IMMUTABLE_REGION_END,
     IMMUTABLE_REGION_START,
+    PROTECTION_MODE,
     append_result,
     best_objective,
     build_candidate_strategy,
     build_prompt,
+    choose_iteration_mode,
     compute_stability_score,
     extract_code_block,
     git_commit,
     load_recent_results,
+    resolve_iteration_route,
     run_cmd,
     run_verification_loop,
     stable_immutable_region_hash,
@@ -167,10 +171,17 @@ def test_validate_strategy_update_allows_evolvable_changes_only() -> None:
 
 
 def test_build_prompt_mentions_evolvable_region_only() -> None:
-    prompt = build_prompt("policy", "strategy", {"objective": 1.0, "sharpe": 0.5, "cagr": 0.1, "max_drawdown": -0.1}, 7)
+    prompt = build_prompt(
+        "policy",
+        "strategy",
+        {"objective": 1.0, "sharpe": 0.5, "cagr": 0.1, "max_drawdown": -0.1},
+        7,
+        ALPHA_MODE,
+    )
     assert EVOLVABLE_REGION_START in prompt
     assert EVOLVABLE_REGION_END in prompt
     assert "raw signal logic only" in prompt
+    assert "Mode: alpha" in prompt
 
 
 def test_stable_immutable_region_hash_ignores_evolvable_body_changes() -> None:
@@ -339,6 +350,41 @@ def test_load_recent_results_and_stability_score() -> None:
 
 def test_compute_stability_score_is_zero_without_history() -> None:
     assert compute_stability_score([], objective_improving=True) == 0.0
+
+
+def test_choose_iteration_mode_uses_startup_and_failure_bias() -> None:
+    assert choose_iteration_mode(1, []) == PROTECTION_MODE
+    assert choose_iteration_mode(5, []) == PROTECTION_MODE
+    assert choose_iteration_mode(6, []) == PROTECTION_MODE
+    assert choose_iteration_mode(9, []) == ALPHA_MODE
+
+    noisy_rows = [
+        {"notes": "alpha:committed", "test_pass": "1"},
+        {"notes": "alpha:verification_pytest_failed", "test_pass": "0"},
+    ]
+    assert choose_iteration_mode(12, noisy_rows) == PROTECTION_MODE
+
+
+def test_resolve_iteration_route_uses_mode_specific_provider(monkeypatch) -> None:
+    import argparse
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    args = argparse.Namespace(
+        provider="auto",
+        model="ignored",
+        alpha_provider="openai",
+        alpha_model="gpt-5.1-mini",
+        protection_provider="anthropic",
+        protection_model="claude-sonnet-4-20250514",
+    )
+
+    assert resolve_iteration_route(args, ALPHA_MODE) == ("openai", "openai-key", "gpt-5.1-mini")
+    assert resolve_iteration_route(args, PROTECTION_MODE) == (
+        "anthropic",
+        "anthropic-key",
+        "claude-sonnet-4-20250514",
+    )
 
 
 def test_run_verification_loop_rejects_hash_failure(monkeypatch) -> None:

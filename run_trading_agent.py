@@ -24,6 +24,8 @@ METRICS_PATH = ROOT / "metrics" / "latest_metrics.json"
 STRATEGY_PATH = ROOT / "strategy.py"
 PROGRAM_PATH = ROOT / "program.md"
 AGENT_LOG_PATH = ROOT / "logs" / "agent.log"
+ALPHA_MODE = "alpha"
+PROTECTION_MODE = "protection"
 EVOLVABLE_REGION_START = "# === EVOLVABLE REGION START ==="
 EVOLVABLE_REGION_END = "# === EVOLVABLE REGION END ==="
 IMMUTABLE_REGION_START = "# === IMMUTABLE REGION START ==="
@@ -313,6 +315,53 @@ def pick_provider(preferred: str) -> Tuple[str, str]:
     raise RuntimeError("No API key found. Set ANTHROPIC_API_KEY and/or OPENAI_API_KEY in .env")
 
 
+def provider_api_key(provider: str) -> str:
+    if provider == "anthropic":
+        return os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if provider == "openai":
+        return os.getenv("OPENAI_API_KEY", "").strip()
+    raise ValueError(f"Unsupported provider: {provider}")
+
+
+def choose_iteration_mode(iteration: int, recent_rows: List[Dict[str, str]]) -> str:
+    if iteration <= 5:
+        return PROTECTION_MODE
+
+    attempted = len(recent_rows)
+    if attempted:
+        crash_rate = sum(1 for row in recent_rows if _is_crash_note(row.get("notes", ""))) / attempted
+        rejected_ratio = sum(1 for row in recent_rows if _is_rejected_edit_note(row.get("notes", ""))) / attempted
+        if crash_rate > 0.05 or rejected_ratio < 0.8:
+            return PROTECTION_MODE
+
+    offset = max(iteration - 6, 0) % 10
+    return PROTECTION_MODE if offset in {0, 1, 2} else ALPHA_MODE
+
+
+def resolve_iteration_route(args: argparse.Namespace, mode: str) -> Tuple[str, str, str]:
+    if args.provider != "auto":
+        provider = args.provider
+        key = provider_api_key(provider)
+        if not key:
+            raise RuntimeError(f"Missing API key for forced provider: {provider}")
+        return provider, key, args.model
+
+    if mode == PROTECTION_MODE:
+        provider = args.protection_provider
+        model = args.protection_model
+    else:
+        provider = args.alpha_provider
+        model = args.alpha_model
+
+    key = provider_api_key(provider)
+    if key:
+        return provider, key, model
+
+    fallback_provider, fallback_key = pick_provider(provider)
+    fallback_model = args.protection_model if fallback_provider == "anthropic" else args.alpha_model
+    return fallback_provider, fallback_key, fallback_model
+
+
 def call_anthropic(api_key: str, model: str, prompt: str, max_retries: int = 5) -> str:
     url = "https://api.anthropic.com/v1/messages"
     headers = {
@@ -417,7 +466,12 @@ def send_email_summary(message: str) -> None:
         pass
 
 
-def build_prompt(program_md: str, current_strategy: str, metrics: Dict[str, float], iteration: int) -> str:
+def build_prompt(program_md: str, current_strategy: str, metrics: Dict[str, float], iteration: int, mode: str) -> str:
+    mode_instructions = (
+        "Mode: protection. Prefer the smallest possible bounded raw-signal edit that improves robustness and testability."
+        if mode == PROTECTION_MODE
+        else "Mode: alpha. Search for small, legitimate raw-signal improvements without increasing runtime or touching risk logic."
+    )
     return f"""
 You are editing strategy.py for autonomous trading research.
 
@@ -430,6 +484,7 @@ Rules:
 - Keep no-lookahead behavior and walk-forward validation.
 - Keep runtime for each command under 30 seconds on CPU.
 - Favor robust out-of-sample performance over fragile in-sample overfit.
+- {mode_instructions}
 
 Current objective: {metrics.get('objective', -1e9):.6f}
 Current sharpe: {metrics.get('sharpe', -1e9):.6f}
@@ -492,6 +547,7 @@ def run_verification_loop(current_metrics: Dict[str, float]) -> Tuple[bool, Dict
 
 def run_iteration(
     iteration: int,
+    mode: str,
     provider: str,
     key: str,
     model: str,
@@ -530,7 +586,7 @@ def run_iteration(
 
     program_text = PROGRAM_PATH.read_text(encoding="utf-8")
     old_code = STRATEGY_PATH.read_text(encoding="utf-8")
-    prompt = build_prompt(program_text, old_code, current_metrics, iteration)
+    prompt = build_prompt(program_text, old_code, current_metrics, iteration, mode)
 
     try:
         if provider == "anthropic":
@@ -603,8 +659,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--loop-forever", action="store_true")
     p.add_argument("--sleep-seconds", type=float, default=2.0)
     p.add_argument("--provider", choices=["auto", "anthropic", "openai"], default="auto")
-    p.add_argument("--model", default="claude-3-7-sonnet-latest")
-    p.add_argument("--fallback-model", default="gpt-4.1-mini")
+    p.add_argument("--model", default="gpt-4.1-mini")
+    p.add_argument("--fallback-model", default="claude-sonnet-4-20250514")
+    p.add_argument("--alpha-provider", choices=["anthropic", "openai"], default="openai")
+    p.add_argument("--alpha-model", default="gpt-5.1-mini")
+    p.add_argument("--protection-provider", choices=["anthropic", "openai"], default="anthropic")
+    p.add_argument("--protection-model", default="claude-sonnet-4-20250514")
     p.add_argument("--symbol", default="SPY")
     p.add_argument("--source", choices=["yfinance", "ccxt"], default="yfinance")
     p.add_argument("--exchange", default="binance")
@@ -617,30 +677,23 @@ def main() -> None:
     load_dotenv(ROOT / ".env")
     args = _parser().parse_args()
 
-    preferred = "anthropic" if args.provider == "auto" else args.provider
-    provider, key = pick_provider(preferred)
-
-    # Fallback model/provider logic.
-    primary_model = args.model
-    if provider == "openai" and primary_model.startswith("claude"):
-        primary_model = args.fallback_model
-    if provider == "anthropic" and primary_model.startswith("gpt"):
-        primary_model = "claude-3-7-sonnet-latest"
-
     webhook = os.getenv("SLACK_WEBHOOK_URL", "").strip()
 
-    iteration = 1
+    iteration = len(load_recent_results(RESULTS_PATH, limit=1_000_000)) + 1
     daily_rows: List[Dict[str, str]] = []
     current_day = dt.datetime.now(dt.timezone.utc).date()
 
     while True:
-        ok, metrics, meta = run_iteration(iteration, provider, key, primary_model, args)
+        recent_rows = load_recent_results(RESULTS_PATH)
+        mode = ALPHA_MODE if args.provider != "auto" else choose_iteration_mode(iteration, recent_rows)
+        provider, key, model = resolve_iteration_route(args, mode)
+        ok, metrics, meta = run_iteration(iteration, mode, provider, key, model, args)
 
-        notes = "committed" if ok else meta
+        notes = f"{mode}:committed" if ok else f"{mode}:{meta}"
         commit_hash = meta if ok else ""
         append_result(
             provider=provider,
-            model=primary_model,
+            model=model,
             iteration=iteration,
             tests_ok=ok,
             metrics=metrics,
