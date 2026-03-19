@@ -276,6 +276,13 @@ def build_candidate_strategy(old_code: str, generated_code: str) -> str:
         replacement = generated_code[generated_start:generated_end]
         replacement = replacement.split(EVOLVABLE_REGION_START, 1)[1]
         replacement = replacement.rsplit(EVOLVABLE_REGION_END, 1)[0].strip()
+    forbidden_markers = {
+        EVOLVABLE_REGION_START,
+        EVOLVABLE_REGION_END,
+        IMMUTABLE_REGION_START,
+        IMMUTABLE_REGION_END,
+    }
+    replacement = "\n".join(line for line in replacement.splitlines() if line.strip() not in forbidden_markers).strip()
     wrapped = "\n".join([EVOLVABLE_REGION_START, replacement, EVOLVABLE_REGION_END])
     return old_code[:start] + wrapped + old_code[end:]
 
@@ -557,8 +564,11 @@ def run_iteration(
             "notes": "committed",
         }
     ]
-    projected_stability = compute_stability_score(projected_rows[-10:], objective_improving=objective_improved)
+    if not objective_improved:
+        STRATEGY_PATH.write_text(old_code, encoding="utf-8")
+        return False, candidate_metrics, "no_improvement"
 
+    projected_stability = compute_stability_score(projected_rows[-10:], objective_improving=True)
     if projected_stability + 1e-12 < current_stability:
         STRATEGY_PATH.write_text(old_code, encoding="utf-8")
         append_agent_log(
@@ -566,10 +576,6 @@ def run_iteration(
             f"stability_score_dropped current={current_stability:.6f} projected={projected_stability:.6f}",
         )
         return False, candidate_metrics, "stability_score_dropped"
-
-    if not objective_improved:
-        STRATEGY_PATH.write_text(old_code, encoding="utf-8")
-        return False, candidate_metrics, "no_improvement"
 
     commit_hash = git_commit(
         f"agent: verified improvement to {candidate_metrics['objective']:.6f} at iter {iteration}"

@@ -282,6 +282,35 @@ def test_build_candidate_strategy_discards_generated_immutable_changes() -> None
     assert "pct_change" in built
 
 
+def test_build_candidate_strategy_strips_marker_lines_from_replacement() -> None:
+    old = "\n".join(
+        [
+            IMMUTABLE_REGION_START,
+            "header",
+            EVOLVABLE_REGION_START,
+            "def generate_raw_signal(df, params):",
+            "    return 0.0",
+            EVOLVABLE_REGION_END,
+            "footer",
+            IMMUTABLE_REGION_END,
+        ]
+    )
+    snippet = "\n".join(
+        [
+            "def generate_raw_signal(df, params):",
+            f"    print({IMMUTABLE_REGION_START!r})",
+            IMMUTABLE_REGION_END,
+            "    return 0.5",
+        ]
+    )
+
+    built = build_candidate_strategy(old, snippet)
+
+    assert sum(1 for line in built.splitlines() if line == IMMUTABLE_REGION_END) == 1
+    assert sum(1 for line in built.splitlines() if line == IMMUTABLE_REGION_START) == 1
+    assert "return 0.5" in built
+
+
 def test_load_recent_results_and_stability_score() -> None:
     import run_trading_agent as agent
 
