@@ -7,12 +7,15 @@ import subprocess
 from run_trading_agent import (
     EVOLVABLE_REGION_END,
     EVOLVABLE_REGION_START,
+    IMMUTABLE_REGION_END,
+    IMMUTABLE_REGION_START,
     append_result,
     best_objective,
     build_prompt,
     extract_code_block,
     git_commit,
     run_cmd,
+    stable_immutable_region_hash,
     validate_strategy_update,
 )
 
@@ -121,14 +124,16 @@ def test_git_commit_ignores_metrics_json_when_file_is_gitignored(monkeypatch) ->
 def test_validate_strategy_update_rejects_immutable_changes() -> None:
     old = "\n".join(
         [
+            IMMUTABLE_REGION_START,
             "header",
             EVOLVABLE_REGION_START,
             "raw = 1",
             EVOLVABLE_REGION_END,
             "footer",
+            IMMUTABLE_REGION_END,
         ]
     )
-    new = old.replace("footer", "footer changed")
+    new = old.replace("footer", "footer changed", 1)
 
     ok, reason = validate_strategy_update(old, new)
 
@@ -139,11 +144,13 @@ def test_validate_strategy_update_rejects_immutable_changes() -> None:
 def test_validate_strategy_update_allows_evolvable_changes_only() -> None:
     old = "\n".join(
         [
+            IMMUTABLE_REGION_START,
             "header",
             EVOLVABLE_REGION_START,
             "raw = 1",
             EVOLVABLE_REGION_END,
             "footer",
+            IMMUTABLE_REGION_END,
         ]
     )
     new = old.replace("raw = 1", "raw = raw.clip(0.0, 1.0)")
@@ -159,3 +166,19 @@ def test_build_prompt_mentions_evolvable_region_only() -> None:
     assert EVOLVABLE_REGION_START in prompt
     assert EVOLVABLE_REGION_END in prompt
     assert "raw signal logic only" in prompt
+
+
+def test_stable_immutable_region_hash_ignores_evolvable_body_changes() -> None:
+    old = "\n".join(
+        [
+            IMMUTABLE_REGION_START,
+            EVOLVABLE_REGION_START,
+            "raw = 1",
+            EVOLVABLE_REGION_END,
+            "footer",
+            IMMUTABLE_REGION_END,
+        ]
+    )
+    new = old.replace("raw = 1", "raw = raw.clip(-1.0, 1.0)")
+
+    assert stable_immutable_region_hash(old) == stable_immutable_region_hash(new)

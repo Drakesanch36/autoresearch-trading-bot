@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 TRADING_DAYS = 252
+REJECTED_SCORE = -1e9
 EVOLVABLE_REGION_START = "# === EVOLVABLE REGION START ==="
 EVOLVABLE_REGION_END = "# === EVOLVABLE REGION END ==="
 IMMUTABLE_REGION_START = "# === IMMUTABLE REGION START ==="
@@ -20,11 +21,26 @@ IMMUTABLE_REGION_END = "# === IMMUTABLE REGION END ==="
 class StrategyParams:
     fast_window: int = 20
     slow_window: int = 80
+
+
+@dataclass(frozen=True)
+class RiskPolicy:
     vol_window: int = 20
-    vol_target: float = 0.15
-    max_leverage: float = 1.5
+    vol_target: float = 0.12
+    max_leverage: float = 1.0
     fee_bps: float = 2.0
     max_drawdown: float = 0.20
+    min_mean_abs_exposure: float = 0.05
+    min_active_day_pct: float = 0.10
+    min_annualized_volatility: float = 0.01
+    min_trades: int = 4
+    min_turnover: float = 2.0
+    active_exposure_threshold: float = 0.05
+
+
+DEFAULT_RISK_POLICY = RiskPolicy()
+
+# === IMMUTABLE REGION START ===
 
 
 def read_frame(base_path: Path) -> pd.DataFrame:
@@ -77,6 +93,7 @@ def performance_metrics(returns: pd.Series) -> Dict[str, float]:
             "max_drawdown": 0.0,
             "calmar": 0.0,
             "win_rate": 0.0,
+            "annualized_volatility": 0.0,
         }
 
     equity = (1.0 + rets).cumprod()
@@ -88,6 +105,7 @@ def performance_metrics(returns: pd.Series) -> Dict[str, float]:
     max_dd = compute_max_drawdown(equity)
     calmar = float(cagr / abs(max_dd)) if max_dd < 0 else 0.0
     win_rate = float((rets > 0).mean())
+    annualized_volatility = float(rets.std(ddof=0) * np.sqrt(TRADING_DAYS))
 
     return {
         "total_return": total_return,
@@ -97,29 +115,35 @@ def performance_metrics(returns: pd.Series) -> Dict[str, float]:
         "max_drawdown": max_dd,
         "calmar": calmar,
         "win_rate": win_rate,
+        "annualized_volatility": annualized_volatility,
     }
 
-# === IMMUTABLE REGION START ===
+
 # === EVOLVABLE REGION START ===
 def generate_raw_signal(df: pd.DataFrame, params: StrategyParams) -> pd.Series:
     close = df["close"].astype(float)
-    fast = close.rolling(params.fast_window).mean()
-    slow = close.rolling(params.slow_window).mean()
-    return (fast > slow).astype(float).fillna(0.0)
+    fast = close.rolling(params.fast_window, min_periods=params.fast_window).mean()
+    slow = close.rolling(params.slow_window, min_periods=params.slow_window).mean()
+    signal = np.sign(fast - slow)
+    return signal.fillna(0.0).clip(-1.0, 1.0)
+
+
 # === EVOLVABLE REGION END ===
 
 
-def generate_signals(df: pd.DataFrame, params: StrategyParams) -> pd.Series:
+def compute_target_leverage(df: pd.DataFrame, risk_policy: RiskPolicy = DEFAULT_RISK_POLICY) -> pd.Series:
     close = df["close"].astype(float)
     ret_1 = close.pct_change().fillna(0.0)
+    realized_vol = ret_1.rolling(risk_policy.vol_window, min_periods=risk_policy.vol_window).std()
+    realized_vol = realized_vol * np.sqrt(TRADING_DAYS)
+    target_leverage = (risk_policy.vol_target / realized_vol.replace(0, np.nan)).clip(0, risk_policy.max_leverage)
+    return target_leverage.fillna(0.0)
+
+
+def generate_signals(df: pd.DataFrame, params: StrategyParams, risk_policy: RiskPolicy = DEFAULT_RISK_POLICY) -> pd.Series:
     raw_signal = generate_raw_signal(df, params)
-    realized_vol = ret_1.rolling(params.vol_window).std() * np.sqrt(TRADING_DAYS)
-    target_leverage = (params.vol_target / realized_vol.replace(0, np.nan)).clip(0, params.max_leverage)
-    target_leverage = target_leverage.fillna(0.0)
-
-    raw_position = raw_signal * target_leverage
-
-    # Shift by 1 bar to avoid lookahead.
+    target_leverage = compute_target_leverage(df, risk_policy)
+    raw_position = (raw_signal * target_leverage).clip(-risk_policy.max_leverage, risk_policy.max_leverage)
     return raw_position.shift(1).fillna(0.0)
 
 
@@ -130,20 +154,92 @@ def apply_drawdown_kill_switch(returns: pd.Series, max_drawdown: float) -> pd.Se
     return returns.where(~breached, 0.0)
 
 
-def backtest(df: pd.DataFrame, params: StrategyParams) -> Dict[str, object]:
+def average_holding_period(position: pd.Series, exposure_threshold: float) -> float:
+    active = position.abs() >= exposure_threshold
+    if not active.any():
+        return 0.0
+
+    runs: List[int] = []
+    current = 0
+    for flag in active:
+        if flag:
+            current += 1
+        elif current:
+            runs.append(current)
+            current = 0
+    if current:
+        runs.append(current)
+    return float(np.mean(runs)) if runs else 0.0
+
+
+def evaluate_guardrails(
+    position: pd.Series,
+    returns: pd.Series,
+    turnover: pd.Series,
+    metrics: Dict[str, float],
+    risk_policy: RiskPolicy = DEFAULT_RISK_POLICY,
+) -> Dict[str, object]:
+    mean_abs_exposure = float(position.abs().mean())
+    active_days = position.abs() >= risk_policy.active_exposure_threshold
+    percent_active_days = float(active_days.mean())
+    annualized_volatility = float(metrics.get("annualized_volatility", 0.0))
+    total_turnover = float(turnover.sum())
+    trade_count = int((position.diff().abs() > 1e-12).sum())
+    avg_holding_period = average_holding_period(position, risk_policy.active_exposure_threshold)
+
+    checks = {
+        "mean_abs_exposure": mean_abs_exposure >= risk_policy.min_mean_abs_exposure,
+        "percent_active_days": percent_active_days >= risk_policy.min_active_day_pct,
+        "annualized_volatility": annualized_volatility >= risk_policy.min_annualized_volatility,
+        "finite_objective_inputs": all(
+            np.isfinite(
+                [
+                    float(metrics.get("sharpe", 0.0)),
+                    float(metrics.get("cagr", 0.0)),
+                    float(metrics.get("max_drawdown", 0.0)),
+                ]
+            )
+        ),
+        "minimum_trades_or_turnover": trade_count >= risk_policy.min_trades or total_turnover >= risk_policy.min_turnover,
+    }
+
+    passed = all(checks.values())
+    return {
+        "passed": passed,
+        "checks": checks,
+        "mean_abs_exposure": mean_abs_exposure,
+        "percent_active_days": percent_active_days,
+        "annualized_volatility": annualized_volatility,
+        "turnover": total_turnover,
+        "trade_count": trade_count,
+        "average_holding_period": avg_holding_period,
+    }
+
+
+def backtest(df: pd.DataFrame, params: StrategyParams, risk_policy: RiskPolicy = DEFAULT_RISK_POLICY) -> Dict[str, object]:
     close = df["close"].astype(float)
     asset_ret = close.pct_change().fillna(0.0)
-    position = generate_signals(df, params)
+    position = generate_signals(df, params, risk_policy)
 
     gross_ret = position * asset_ret
     turnover = position.diff().abs().fillna(position.abs())
-    fees = turnover * (params.fee_bps / 10_000.0)
+    fees = turnover * (risk_policy.fee_bps / 10_000.0)
     net_ret = gross_ret - fees
-    net_ret = apply_drawdown_kill_switch(net_ret, params.max_drawdown)
+    net_ret = apply_drawdown_kill_switch(net_ret, risk_policy.max_drawdown)
 
     equity = (1.0 + net_ret).cumprod()
     metrics = performance_metrics(net_ret)
-    metrics["trades"] = int((position.diff().abs() > 1e-12).sum())
+    guardrails = evaluate_guardrails(position, net_ret, turnover, metrics, risk_policy)
+    metrics.update(
+        {
+            "trades": guardrails["trade_count"],
+            "turnover": guardrails["turnover"],
+            "mean_abs_exposure": guardrails["mean_abs_exposure"],
+            "percent_active_days": guardrails["percent_active_days"],
+            "average_holding_period": guardrails["average_holding_period"],
+            "guardrails_passed": guardrails["passed"],
+        }
+    )
 
     return {
         "returns": net_ret,
@@ -151,124 +247,203 @@ def backtest(df: pd.DataFrame, params: StrategyParams) -> Dict[str, object]:
         "equity": equity,
         "metrics": metrics,
         "params": asdict(params),
+        "guardrails": guardrails,
     }
 
 
 def parameter_grid() -> Iterable[StrategyParams]:
-    for fast in (10, 20, 30):
-        for slow in (40, 60, 90):
+    for fast in (15, 20, 30):
+        for slow in (55, 75, 95):
             if fast >= slow:
                 continue
-            for vol_target in (0.10, 0.15, 0.20):
-                yield StrategyParams(
-                    fast_window=fast,
-                    slow_window=slow,
-                    vol_window=20,
-                    vol_target=vol_target,
-                    max_leverage=1.5,
-                    fee_bps=2.0,
-                    max_drawdown=0.20,
-                )
+            yield StrategyParams(
+                fast_window=fast,
+                slow_window=slow,
+            )
 
 
 def objective(metrics: Dict[str, float]) -> float:
+    if not bool(metrics.get("guardrails_passed", True)):
+        return REJECTED_SCORE
+
     sharpe = float(metrics.get("sharpe", 0.0))
     cagr = float(metrics.get("cagr", 0.0))
     max_dd = abs(float(metrics.get("max_drawdown", 0.0)))
-    penalty = max(0.0, max_dd - 0.20) * 5.0
-    return sharpe + 0.5 * cagr - penalty
+    if not np.isfinite([sharpe, cagr, max_dd]).all():
+        return REJECTED_SCORE
+
+    score = sharpe + 0.5 * cagr - max(0.0, max_dd - 0.20) * 5.0
+    if not np.isfinite(score) or score < -100.0 or score > 100.0:
+        return REJECTED_SCORE
+    return float(score)
 
 
-def optimize_params(train: pd.DataFrame, valid: pd.DataFrame) -> Tuple[StrategyParams, Dict[str, float]]:
+def generate_time_series_folds(
+    df: pd.DataFrame,
+    train_size: int = 252 * 2,
+    valid_size: int = 126,
+    step_size: int = 63,
+    offsets: Tuple[int, ...] = (0, 63),
+) -> List[Dict[str, object]]:
+    folds: List[Dict[str, object]] = []
+    seen: set[Tuple[pd.Timestamp, pd.Timestamp]] = set()
+
+    for offset in offsets:
+        start = offset
+        while start + train_size + valid_size <= len(df):
+            train = df.iloc[start : start + train_size]
+            valid = df.iloc[start + train_size : start + train_size + valid_size]
+            if train.empty or valid.empty:
+                break
+            key = (train.index[0], valid.index[-1])
+            if key not in seen:
+                folds.append(
+                    {
+                        "train": train,
+                        "valid": valid,
+                        "train_start": str(train.index[0]),
+                        "train_end": str(train.index[-1]),
+                        "valid_start": str(valid.index[0]),
+                        "valid_end": str(valid.index[-1]),
+                    }
+                )
+                seen.add(key)
+            start += step_size
+
+    return folds
+
+
+def summarize_validation_runs(fold_runs: List[Dict[str, object]]) -> Dict[str, object]:
+    if not fold_runs:
+        return {
+            "fold_count": 0,
+            "median_fold_score": REJECTED_SCORE,
+            "lower_quartile_fold_score": REJECTED_SCORE,
+            "worst_fold_drawdown": -1.0,
+            "selection_score": REJECTED_SCORE,
+            "guardrails_passed": False,
+            "folds": [],
+        }
+
+    scores = [float(run["score"]) for run in fold_runs]
+    drawdowns = [float(run["validation"]["max_drawdown"]) for run in fold_runs]
+    guardrails_passed = all(bool(run["validation"].get("guardrails_passed", False)) for run in fold_runs)
+    median_fold_score = float(np.median(scores))
+    lower_quartile_fold_score = float(np.quantile(scores, 0.25))
+    worst_fold_drawdown = float(np.min(drawdowns))
+    selection_score = REJECTED_SCORE if not guardrails_passed else min(median_fold_score, lower_quartile_fold_score)
+
+    return {
+        "fold_count": len(fold_runs),
+        "median_fold_score": median_fold_score,
+        "lower_quartile_fold_score": lower_quartile_fold_score,
+        "worst_fold_drawdown": worst_fold_drawdown,
+        "selection_score": selection_score,
+        "guardrails_passed": guardrails_passed,
+        "folds": fold_runs,
+    }
+
+
+def optimize_params(
+    train: pd.DataFrame,
+    valid: pd.DataFrame,
+    risk_policy: RiskPolicy = DEFAULT_RISK_POLICY,
+) -> Tuple[StrategyParams, Dict[str, object]]:
+    selection_df = pd.concat([train, valid]).sort_index()
+    folds = generate_time_series_folds(selection_df)
+
     best_params = StrategyParams()
-    best_metrics: Dict[str, float] = {"sharpe": -1e9, "cagr": -1e9, "max_drawdown": -1.0}
-    best_score = -1e9
+    best_summary = summarize_validation_runs([])
+    best_score = REJECTED_SCORE
 
     for candidate in parameter_grid():
-        train_metrics = backtest(train, candidate)["metrics"]
-        valid_metrics = backtest(valid, candidate)["metrics"]
+        fold_runs: List[Dict[str, object]] = []
+        for fold in folds:
+            validation_result = backtest(fold["valid"], candidate, risk_policy)
+            validation_metrics = validation_result["metrics"]
+            score = objective(validation_metrics)
+            fold_runs.append(
+                {
+                    "train_start": fold["train_start"],
+                    "train_end": fold["train_end"],
+                    "valid_start": fold["valid_start"],
+                    "valid_end": fold["valid_end"],
+                    "validation": validation_metrics,
+                    "score": score,
+                }
+            )
 
-        combined = {
-            "sharpe": 0.4 * train_metrics["sharpe"] + 0.6 * valid_metrics["sharpe"],
-            "cagr": 0.4 * train_metrics["cagr"] + 0.6 * valid_metrics["cagr"],
-            "max_drawdown": min(train_metrics["max_drawdown"], valid_metrics["max_drawdown"]),
-        }
-        score = objective(combined)
-        if score > best_score:
-            best_score = score
+        summary = summarize_validation_runs(fold_runs)
+        if summary["selection_score"] > best_score:
+            best_score = float(summary["selection_score"])
             best_params = candidate
-            best_metrics = combined
+            best_summary = summary
 
-    return best_params, best_metrics
+    return best_params, best_summary
 
 
 def walk_forward_validate(
     df: pd.DataFrame,
     train_size: int = 252 * 2,
     valid_size: int = 126,
-    test_size: int = 126,
+    step_size: int = 63,
+    risk_policy: RiskPolicy = DEFAULT_RISK_POLICY,
 ) -> Dict[str, object]:
-    folds: List[Dict[str, object]] = []
-    start = 0
+    folds = generate_time_series_folds(df, train_size=train_size, valid_size=valid_size, step_size=step_size)
+    summarized_folds: List[Dict[str, object]] = []
 
-    while start + train_size + valid_size + test_size <= len(df):
-        tr = df.iloc[start : start + train_size]
-        va = df.iloc[start + train_size : start + train_size + valid_size]
-        te = df.iloc[start + train_size + valid_size : start + train_size + valid_size + test_size]
-
-        params, val_metrics = optimize_params(tr, va)
-        test_run = backtest(te, params)
-
-        folds.append(
+    for fold in folds:
+        params, validation_summary = optimize_params(fold["train"], fold["valid"], risk_policy)
+        test_result = backtest(fold["valid"], params, risk_policy)
+        summarized_folds.append(
             {
-                "start": str(tr.index[0]),
-                "end": str(te.index[-1]),
+                "train_start": fold["train_start"],
+                "train_end": fold["train_end"],
+                "valid_start": fold["valid_start"],
+                "valid_end": fold["valid_end"],
                 "params": asdict(params),
-                "validation": val_metrics,
-                "test": test_run["metrics"],
+                "validation_summary": validation_summary,
+                "test": test_result["metrics"],
             }
         )
-        start += test_size
 
-    if not folds:
+    if not summarized_folds:
         return {
             "fold_count": 0,
-            "avg_test_sharpe": 0.0,
-            "avg_test_cagr": 0.0,
+            "median_fold_result": 0.0,
+            "worst_fold_result": 0.0,
             "worst_test_drawdown": 0.0,
             "folds": [],
         }
 
-    sharpe_vals = [f["test"]["sharpe"] for f in folds]
-    cagr_vals = [f["test"]["cagr"] for f in folds]
-    mdd_vals = [f["test"]["max_drawdown"] for f in folds]
-
+    fold_results = [objective(fold["test"]) for fold in summarized_folds]
+    worst_drawdowns = [float(fold["test"]["max_drawdown"]) for fold in summarized_folds]
     return {
-        "fold_count": len(folds),
-        "avg_test_sharpe": float(np.mean(sharpe_vals)),
-        "avg_test_cagr": float(np.mean(cagr_vals)),
-        "worst_test_drawdown": float(np.min(mdd_vals)),
-        "folds": folds,
+        "fold_count": len(summarized_folds),
+        "median_fold_result": float(np.median(fold_results)),
+        "worst_fold_result": float(np.min(fold_results)),
+        "worst_test_drawdown": float(np.min(worst_drawdowns)),
+        "folds": summarized_folds,
     }
 
 
-def run_strategy(data_dir: Path, output_path: Path) -> Dict[str, object]:
+def run_strategy(data_dir: Path, output_path: Path, risk_policy: RiskPolicy = DEFAULT_RISK_POLICY) -> Dict[str, object]:
     train = read_frame(data_dir / "train")
     valid = read_frame(data_dir / "valid")
     test = read_frame(data_dir / "test")
 
-    best_params, blend_metrics = optimize_params(train, valid)
-    test_result = backtest(test, best_params)
+    best_params, selection_metrics = optimize_params(train, valid, risk_policy)
+    lockbox_result = backtest(test, best_params, risk_policy)
 
     full = pd.concat([train, valid, test]).sort_index()
-    wf = walk_forward_validate(full)
+    wf = walk_forward_validate(full, risk_policy=risk_policy)
 
     summary = {
-        "selection_metrics": blend_metrics,
+        "selection_metrics": selection_metrics,
         "best_params": asdict(best_params),
-        "test_metrics": test_result["metrics"],
+        "test_metrics": lockbox_result["metrics"],
         "walk_forward": wf,
-        "objective": objective(test_result["metrics"]),
+        "objective": objective(lockbox_result["metrics"]),
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,4 +468,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
 # === IMMUTABLE REGION END ===

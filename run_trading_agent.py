@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -23,6 +24,8 @@ STRATEGY_PATH = ROOT / "strategy.py"
 PROGRAM_PATH = ROOT / "program.md"
 EVOLVABLE_REGION_START = "# === EVOLVABLE REGION START ==="
 EVOLVABLE_REGION_END = "# === EVOLVABLE REGION END ==="
+IMMUTABLE_REGION_START = "# === IMMUTABLE REGION START ==="
+IMMUTABLE_REGION_END = "# === IMMUTABLE REGION END ==="
 
 
 @dataclass
@@ -156,15 +159,17 @@ def git_commit(message: str) -> str:
 
 
 def _find_region_bounds(text: str, start_marker: str, end_marker: str) -> Tuple[int, int]:
-    start = text.find(start_marker)
-    if start < 0:
+    start_match = re.search(rf"^{re.escape(start_marker)}$", text, flags=re.MULTILINE)
+    if start_match is None:
         raise ValueError(f"missing start marker: {start_marker}")
-    end = text.find(end_marker)
-    if end < 0:
+    end_match = re.search(rf"^{re.escape(end_marker)}$", text, flags=re.MULTILINE)
+    if end_match is None:
         raise ValueError(f"missing end marker: {end_marker}")
+    start = start_match.start()
+    end = end_match.end()
     if end <= start:
         raise ValueError("invalid marker order")
-    return start, end + len(end_marker)
+    return start, end
 
 
 def _mask_region(text: str, start_marker: str, end_marker: str) -> str:
@@ -172,14 +177,27 @@ def _mask_region(text: str, start_marker: str, end_marker: str) -> str:
     return text[:start] + "<EVOLVABLE_REGION>" + text[end:]
 
 
+def _extract_region(text: str, start_marker: str, end_marker: str) -> str:
+    start, end = _find_region_bounds(text, start_marker, end_marker)
+    return text[start:end]
+
+
+def stable_immutable_region_hash(text: str) -> str:
+    immutable_text = _extract_region(text, IMMUTABLE_REGION_START, IMMUTABLE_REGION_END)
+    masked = _mask_region(immutable_text, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
+    return hashlib.sha256(masked.encode("utf-8")).hexdigest()
+
+
 def validate_strategy_update(old_code: str, new_code: str) -> Tuple[bool, str]:
     try:
         old_masked = _mask_region(old_code, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
         new_masked = _mask_region(new_code, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
+        old_hash = stable_immutable_region_hash(old_code)
+        new_hash = stable_immutable_region_hash(new_code)
     except ValueError as exc:
         return False, f"strategy_guardrails_missing:{exc}"
 
-    if old_masked != new_masked:
+    if old_masked != new_masked or old_hash != new_hash:
         return False, "immutable_research_surface_changed"
 
     return True, ""
