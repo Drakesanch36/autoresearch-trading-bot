@@ -10,6 +10,10 @@ import numpy as np
 import pandas as pd
 
 TRADING_DAYS = 252
+EVOLVABLE_REGION_START = "# === EVOLVABLE REGION START ==="
+EVOLVABLE_REGION_END = "# === EVOLVABLE REGION END ==="
+IMMUTABLE_REGION_START = "# === IMMUTABLE REGION START ==="
+IMMUTABLE_REGION_END = "# === IMMUTABLE REGION END ==="
 
 
 @dataclass(frozen=True)
@@ -95,20 +99,25 @@ def performance_metrics(returns: pd.Series) -> Dict[str, float]:
         "win_rate": win_rate,
     }
 
+# === IMMUTABLE REGION START ===
+# === EVOLVABLE REGION START ===
+def generate_raw_signal(df: pd.DataFrame, params: StrategyParams) -> pd.Series:
+    close = df["close"].astype(float)
+    fast = close.rolling(params.fast_window).mean()
+    slow = close.rolling(params.slow_window).mean()
+    return (fast > slow).astype(float).fillna(0.0)
+# === EVOLVABLE REGION END ===
+
 
 def generate_signals(df: pd.DataFrame, params: StrategyParams) -> pd.Series:
     close = df["close"].astype(float)
     ret_1 = close.pct_change().fillna(0.0)
-
-    fast = close.rolling(params.fast_window).mean()
-    slow = close.rolling(params.slow_window).mean()
-    trend = (fast > slow).astype(float)
-
+    raw_signal = generate_raw_signal(df, params)
     realized_vol = ret_1.rolling(params.vol_window).std() * np.sqrt(TRADING_DAYS)
     target_leverage = (params.vol_target / realized_vol.replace(0, np.nan)).clip(0, params.max_leverage)
     target_leverage = target_leverage.fillna(0.0)
 
-    raw_position = trend * target_leverage
+    raw_position = raw_signal * target_leverage
 
     # Shift by 1 bar to avoid lookahead.
     return raw_position.shift(1).fillna(0.0)
@@ -284,3 +293,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# === IMMUTABLE REGION END ===

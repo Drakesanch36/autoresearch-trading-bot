@@ -4,7 +4,17 @@ import tempfile
 from pathlib import Path
 import subprocess
 
-from run_trading_agent import append_result, best_objective, extract_code_block, git_commit, run_cmd
+from run_trading_agent import (
+    EVOLVABLE_REGION_END,
+    EVOLVABLE_REGION_START,
+    append_result,
+    best_objective,
+    build_prompt,
+    extract_code_block,
+    git_commit,
+    run_cmd,
+    validate_strategy_update,
+)
 
 
 def test_extract_code_block_python_fence() -> None:
@@ -106,3 +116,46 @@ def test_git_commit_ignores_metrics_json_when_file_is_gitignored(monkeypatch) ->
             assert "metrics/latest_metrics.json" not in status.stdout
         finally:
             agent.ROOT = old_root
+
+
+def test_validate_strategy_update_rejects_immutable_changes() -> None:
+    old = "\n".join(
+        [
+            "header",
+            EVOLVABLE_REGION_START,
+            "raw = 1",
+            EVOLVABLE_REGION_END,
+            "footer",
+        ]
+    )
+    new = old.replace("footer", "footer changed")
+
+    ok, reason = validate_strategy_update(old, new)
+
+    assert not ok
+    assert reason == "immutable_research_surface_changed"
+
+
+def test_validate_strategy_update_allows_evolvable_changes_only() -> None:
+    old = "\n".join(
+        [
+            "header",
+            EVOLVABLE_REGION_START,
+            "raw = 1",
+            EVOLVABLE_REGION_END,
+            "footer",
+        ]
+    )
+    new = old.replace("raw = 1", "raw = raw.clip(0.0, 1.0)")
+
+    ok, reason = validate_strategy_update(old, new)
+
+    assert ok
+    assert reason == ""
+
+
+def test_build_prompt_mentions_evolvable_region_only() -> None:
+    prompt = build_prompt("policy", "strategy", {"objective": 1.0, "sharpe": 0.5, "cagr": 0.1, "max_drawdown": -0.1}, 7)
+    assert EVOLVABLE_REGION_START in prompt
+    assert EVOLVABLE_REGION_END in prompt
+    assert "raw signal logic only" in prompt

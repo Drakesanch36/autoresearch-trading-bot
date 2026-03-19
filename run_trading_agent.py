@@ -21,6 +21,8 @@ RESULTS_PATH = ROOT / "results.tsv"
 METRICS_PATH = ROOT / "metrics" / "latest_metrics.json"
 STRATEGY_PATH = ROOT / "strategy.py"
 PROGRAM_PATH = ROOT / "program.md"
+EVOLVABLE_REGION_START = "# === EVOLVABLE REGION START ==="
+EVOLVABLE_REGION_END = "# === EVOLVABLE REGION END ==="
 
 
 @dataclass
@@ -151,6 +153,36 @@ def git_commit(message: str) -> str:
         return ""
     rev = run_cmd(["git", "rev-parse", "--short", "HEAD"])
     return rev.stdout.strip() if rev.ok else ""
+
+
+def _find_region_bounds(text: str, start_marker: str, end_marker: str) -> Tuple[int, int]:
+    start = text.find(start_marker)
+    if start < 0:
+        raise ValueError(f"missing start marker: {start_marker}")
+    end = text.find(end_marker)
+    if end < 0:
+        raise ValueError(f"missing end marker: {end_marker}")
+    if end <= start:
+        raise ValueError("invalid marker order")
+    return start, end + len(end_marker)
+
+
+def _mask_region(text: str, start_marker: str, end_marker: str) -> str:
+    start, end = _find_region_bounds(text, start_marker, end_marker)
+    return text[:start] + "<EVOLVABLE_REGION>" + text[end:]
+
+
+def validate_strategy_update(old_code: str, new_code: str) -> Tuple[bool, str]:
+    try:
+        old_masked = _mask_region(old_code, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
+        new_masked = _mask_region(new_code, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
+    except ValueError as exc:
+        return False, f"strategy_guardrails_missing:{exc}"
+
+    if old_masked != new_masked:
+        return False, "immutable_research_surface_changed"
+
+    return True, ""
 
 
 def extract_code_block(text: str) -> Optional[str]:
@@ -289,6 +321,9 @@ You are editing strategy.py for autonomous trading research.
 
 Rules:
 - Return ONLY the full updated strategy.py in a single ```python fenced block.
+- Only edit code between `{EVOLVABLE_REGION_START}` and `{EVOLVABLE_REGION_END}`.
+- Preserve all code outside the evolvable region byte-for-byte.
+- Keep the evolvable region focused on raw signal logic only.
 - Preserve all function names and CLI behavior.
 - Keep no-lookahead behavior and walk-forward validation.
 - Keep runtime for each command under 30 seconds on CPU.
@@ -361,6 +396,10 @@ def run_iteration(
     new_code = extract_code_block(llm_text)
     if not new_code:
         return False, current_metrics, "llm_response_missing_code"
+
+    valid_update, violation = validate_strategy_update(old_code, new_code)
+    if not valid_update:
+        return False, current_metrics, violation
 
     STRATEGY_PATH.write_text(new_code, encoding="utf-8")
 
