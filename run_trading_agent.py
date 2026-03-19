@@ -143,7 +143,7 @@ def append_result(
 
 
 def git_commit(message: str) -> str:
-    add = run_cmd(["git", "add", "strategy.py", "metrics/latest_metrics.json", "results.tsv"]) 
+    add = run_cmd(["git", "add", "strategy.py", "results.tsv"])
     if not add.ok:
         return ""
     commit = run_cmd(["git", "commit", "-m", message])
