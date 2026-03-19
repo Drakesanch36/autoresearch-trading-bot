@@ -241,3 +241,38 @@ def test_build_candidate_strategy_splices_marked_snippet_without_immutable_regio
     assert "return -1.0" in built
     assert "header" in built
     assert "footer" in built
+
+
+def test_build_candidate_strategy_discards_generated_immutable_changes() -> None:
+    old = "\n".join(
+        [
+            IMMUTABLE_REGION_START,
+            "original header",
+            EVOLVABLE_REGION_START,
+            "def generate_raw_signal(df, params):",
+            "    return 0.0",
+            EVOLVABLE_REGION_END,
+            "original footer",
+            IMMUTABLE_REGION_END,
+        ]
+    )
+    generated_full_file = "\n".join(
+        [
+            IMMUTABLE_REGION_START,
+            "mutated header",
+            EVOLVABLE_REGION_START,
+            "def generate_raw_signal(df, params):",
+            "    return df['close'].pct_change().fillna(0.0)",
+            EVOLVABLE_REGION_END,
+            "mutated footer",
+            IMMUTABLE_REGION_END,
+        ]
+    )
+
+    built = build_candidate_strategy(old, generated_full_file)
+
+    assert "mutated header" not in built
+    assert "mutated footer" not in built
+    assert "original header" in built
+    assert "original footer" in built
+    assert "pct_change" in built

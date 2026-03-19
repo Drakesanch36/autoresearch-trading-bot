@@ -204,16 +204,15 @@ def validate_strategy_update(old_code: str, new_code: str) -> Tuple[bool, str]:
 
 
 def build_candidate_strategy(old_code: str, generated_code: str) -> str:
-    if (
-        IMMUTABLE_REGION_START in generated_code
-        and IMMUTABLE_REGION_END in generated_code
-        and EVOLVABLE_REGION_START in generated_code
-        and EVOLVABLE_REGION_END in generated_code
-    ):
-        return generated_code
-
     start, end = _find_region_bounds(old_code, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
     replacement = generated_code.strip()
+    if EVOLVABLE_REGION_START in generated_code and EVOLVABLE_REGION_END in generated_code:
+        generated_start, generated_end = _find_region_bounds(
+            generated_code, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END
+        )
+        replacement = generated_code[generated_start:generated_end]
+        replacement = replacement.split(EVOLVABLE_REGION_START, 1)[1]
+        replacement = replacement.rsplit(EVOLVABLE_REGION_END, 1)[0].strip()
     wrapped = "\n".join([EVOLVABLE_REGION_START, replacement, EVOLVABLE_REGION_END])
     return old_code[:start] + wrapped + old_code[end:]
 
