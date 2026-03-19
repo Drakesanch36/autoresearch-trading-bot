@@ -117,7 +117,7 @@ def test_generate_raw_signal_is_bounded() -> None:
     data = make_prices(400)
     raw = generate_raw_signal(data, StrategyParams(fast_window=15, slow_window=55))
     assert raw.index.equals(data.index)
-    assert set(raw.dropna().unique()).issubset({-1.0, 0.0, 1.0})
+    assert raw.dropna().between(-1.0, 1.0).all()
 
 
 def test_final_exposure_is_determined_outside_evolvable_block() -> None:

@@ -208,7 +208,7 @@ def _is_rejected_edit_note(note: str) -> bool:
 
 def compute_stability_score(rows: List[Dict[str, str]], objective_improving: bool) -> float:
     if not rows:
-        return 1.0 if objective_improving else 0.2
+        return 0.0
 
     attempted = max(len(rows), 1)
     successful_iters = sum(1 for row in rows if row.get("test_pass") == "1")

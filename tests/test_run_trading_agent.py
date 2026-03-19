@@ -308,6 +308,10 @@ def test_load_recent_results_and_stability_score() -> None:
     assert 0.0 <= score <= 1.0
 
 
+def test_compute_stability_score_is_zero_without_history() -> None:
+    assert compute_stability_score([], objective_improving=True) == 0.0
+
+
 def test_run_verification_loop_rejects_hash_failure(monkeypatch) -> None:
     import run_trading_agent as agent
 
