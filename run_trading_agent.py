@@ -37,13 +37,13 @@ CRASH_NOTES = (
     "candidate_strategy_failed",
     "git_commit_failed",
     "pre_commit_pytest_failed",
-    "verification_pytest_failed",
     "verification_backtest_failed",
-    "immutable_hash_failed",
 )
 REJECTED_EDIT_NOTES = (
     "immutable_research_surface_changed",
+    "immutable_hash_failed",
     "pytest_failed_after_edit",
+    "verification_pytest_failed",
     "strategy_guardrails_missing",
 )
 

@@ -360,7 +360,7 @@ def test_choose_iteration_mode_uses_startup_and_failure_bias() -> None:
 
     noisy_rows = [
         {"notes": "alpha:committed", "test_pass": "1"},
-        {"notes": "alpha:verification_pytest_failed", "test_pass": "0"},
+        {"notes": "alpha:baseline_strategy_failed", "test_pass": "0"},
     ]
     assert choose_iteration_mode(12, noisy_rows) == PROTECTION_MODE
 
