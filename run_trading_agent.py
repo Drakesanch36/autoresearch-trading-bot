@@ -203,6 +203,16 @@ def validate_strategy_update(old_code: str, new_code: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def build_candidate_strategy(old_code: str, generated_code: str) -> str:
+    if EVOLVABLE_REGION_START in generated_code and EVOLVABLE_REGION_END in generated_code:
+        return generated_code
+
+    start, end = _find_region_bounds(old_code, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
+    replacement = generated_code.strip()
+    wrapped = "\n".join([EVOLVABLE_REGION_START, replacement, EVOLVABLE_REGION_END])
+    return old_code[:start] + wrapped + old_code[end:]
+
+
 def extract_code_block(text: str) -> Optional[str]:
     block = re.search(r"```python\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
     if block:
@@ -338,7 +348,7 @@ def build_prompt(program_md: str, current_strategy: str, metrics: Dict[str, floa
 You are editing strategy.py for autonomous trading research.
 
 Rules:
-- Return ONLY the full updated strategy.py in a single ```python fenced block.
+- Return either the full updated strategy.py or only the replacement code for the evolvable region in a single ```python fenced block.
 - Only edit code between `{EVOLVABLE_REGION_START}` and `{EVOLVABLE_REGION_END}`.
 - Preserve all code outside the evolvable region byte-for-byte.
 - Keep the evolvable region focused on raw signal logic only.
@@ -414,6 +424,8 @@ def run_iteration(
     new_code = extract_code_block(llm_text)
     if not new_code:
         return False, current_metrics, "llm_response_missing_code"
+
+    new_code = build_candidate_strategy(old_code, new_code)
 
     valid_update, violation = validate_strategy_update(old_code, new_code)
     if not valid_update:

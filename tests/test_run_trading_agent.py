@@ -11,6 +11,7 @@ from run_trading_agent import (
     IMMUTABLE_REGION_START,
     append_result,
     best_objective,
+    build_candidate_strategy,
     build_prompt,
     extract_code_block,
     git_commit,
@@ -182,3 +183,30 @@ def test_stable_immutable_region_hash_ignores_evolvable_body_changes() -> None:
     new = old.replace("raw = 1", "raw = raw.clip(-1.0, 1.0)")
 
     assert stable_immutable_region_hash(old) == stable_immutable_region_hash(new)
+
+
+def test_build_candidate_strategy_splices_evolvable_snippet_into_old_code() -> None:
+    old = "\n".join(
+        [
+            IMMUTABLE_REGION_START,
+            "header",
+            EVOLVABLE_REGION_START,
+            "def generate_raw_signal(df, params):",
+            "    return 0.0",
+            EVOLVABLE_REGION_END,
+            "footer",
+            IMMUTABLE_REGION_END,
+        ]
+    )
+    snippet = "\n".join(
+        [
+            "def generate_raw_signal(df, params):",
+            "    return 1.0",
+        ]
+    )
+
+    built = build_candidate_strategy(old, snippet)
+
+    assert "return 1.0" in built
+    assert "header" in built
+    assert "footer" in built
