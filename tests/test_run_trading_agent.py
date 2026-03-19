@@ -374,12 +374,12 @@ def test_resolve_iteration_route_uses_mode_specific_provider(monkeypatch) -> Non
         provider="auto",
         model="ignored",
         alpha_provider="openai",
-        alpha_model="gpt-5.1-mini",
+        alpha_model="gpt-5.4",
         protection_provider="anthropic",
         protection_model="claude-sonnet-4-20250514",
     )
 
-    assert resolve_iteration_route(args, ALPHA_MODE) == ("openai", "openai-key", "gpt-5.1-mini")
+    assert resolve_iteration_route(args, ALPHA_MODE) == ("openai", "openai-key", "gpt-5.4")
     assert resolve_iteration_route(args, PROTECTION_MODE) == (
         "anthropic",
         "anthropic-key",

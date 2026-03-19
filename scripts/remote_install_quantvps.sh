@@ -123,7 +123,7 @@ User=${RUN_USER}
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${ENV_FILE}
 Environment=PYTHONPATH=${APP_DIR}
-ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/run_trading_agent.py --loop-forever --provider auto --alpha-provider openai --alpha-model gpt-5.1-mini --protection-provider anthropic --protection-model claude-sonnet-4-20250514
+ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/run_trading_agent.py --loop-forever --provider auto --alpha-provider openai --alpha-model gpt-5.4 --protection-provider anthropic --protection-model claude-sonnet-4-20250514
 Restart=always
 RestartSec=10
 TimeoutStopSec=30

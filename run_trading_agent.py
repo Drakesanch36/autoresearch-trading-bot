@@ -667,7 +667,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default="gpt-4.1-mini")
     p.add_argument("--fallback-model", default="claude-sonnet-4-20250514")
     p.add_argument("--alpha-provider", choices=["anthropic", "openai"], default="openai")
-    p.add_argument("--alpha-model", default="gpt-5.1-mini")
+    p.add_argument("--alpha-model", default="gpt-5.4")
     p.add_argument("--protection-provider", choices=["anthropic", "openai"], default="anthropic")
     p.add_argument("--protection-model", default="claude-sonnet-4-20250514")
     p.add_argument("--symbol", default="SPY")
