@@ -200,11 +200,17 @@ def load_recent_results(results_path: Path, limit: int = 10) -> List[Dict[str, s
     return rows[-limit:]
 
 
+def _normalize_note(note: str) -> str:
+    return note.split(":", 1)[1] if ":" in note else note
+
+
 def _is_crash_note(note: str) -> bool:
+    note = _normalize_note(note)
     return any(note.startswith(prefix) for prefix in CRASH_NOTES) or note.startswith("llm_error:")
 
 
 def _is_rejected_edit_note(note: str) -> bool:
+    note = _normalize_note(note)
     return any(note.startswith(prefix) for prefix in REJECTED_EDIT_NOTES)
 
 
@@ -330,8 +336,7 @@ def choose_iteration_mode(iteration: int, recent_rows: List[Dict[str, str]]) -> 
     attempted = len(recent_rows)
     if attempted:
         crash_rate = sum(1 for row in recent_rows if _is_crash_note(row.get("notes", ""))) / attempted
-        rejected_ratio = sum(1 for row in recent_rows if _is_rejected_edit_note(row.get("notes", ""))) / attempted
-        if crash_rate > 0.05 or rejected_ratio < 0.8:
+        if crash_rate > 0.05:
             return PROTECTION_MODE
 
     offset = max(iteration - 6, 0) % 10
