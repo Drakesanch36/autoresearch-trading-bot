@@ -7,12 +7,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import strategy
 from strategy import (
     DEFAULT_RISK_POLICY,
     EVOLVABLE_REGION_END,
     EVOLVABLE_REGION_START,
+    EXPECTED_IMMUTABLE_HASH,
     IMMUTABLE_REGION_END,
     IMMUTABLE_REGION_START,
     REJECTED_SCORE,
@@ -20,6 +22,7 @@ from strategy import (
     StrategyParams,
     average_holding_period,
     backtest,
+    compute_immutable_region_hash_from_text,
     compute_max_drawdown,
     compute_target_leverage,
     compute_sharpe,
@@ -33,6 +36,7 @@ from strategy import (
     performance_metrics,
     run_strategy,
     summarize_validation_runs,
+    verify_expected_immutable_hash,
     walk_forward_validate,
 )
 
@@ -81,6 +85,18 @@ def stable_immutable_hash(text: str) -> str:
     assert end is not None
     masked = immutable_text[: start.start()] + "<EVOLVABLE_REGION>" + immutable_text[end.end() :]
     return hashlib.sha256(masked.encode("utf-8")).hexdigest()
+
+
+def test_expected_immutable_hash_matches_current_source() -> None:
+    source = strategy_source()
+    assert compute_immutable_region_hash_from_text(source) == EXPECTED_IMMUTABLE_HASH
+
+
+def test_verify_expected_immutable_hash_raises_on_mismatch(monkeypatch) -> None:
+    monkeypatch.setattr(strategy, "compute_immutable_region_hash_from_text", lambda text: "bad-hash")
+
+    with pytest.raises(RuntimeError, match="Immutable strategy kernel hash mismatch"):
+        verify_expected_immutable_hash()
 
 
 def test_compute_sharpe_known_value() -> None:
@@ -155,6 +171,7 @@ def test_backtest_output_and_drawdown_bounds() -> None:
         "win_rate",
         "trades",
         "annualized_volatility",
+        "max_abs_position",
         "mean_abs_exposure",
         "percent_active_days",
         "turnover",
@@ -164,6 +181,7 @@ def test_backtest_output_and_drawdown_bounds() -> None:
     assert required.issubset(metrics.keys())
     assert metrics["max_drawdown"] <= 0.0
     assert isinstance(metrics["trades"], int)
+    assert metrics["max_abs_position"] <= DEFAULT_RISK_POLICY.max_leverage + 1e-12
 
 
 def test_near_flat_strategy_is_rejected_by_guardrails() -> None:

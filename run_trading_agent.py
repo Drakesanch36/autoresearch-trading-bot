@@ -5,6 +5,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import smtplib
@@ -22,10 +23,27 @@ RESULTS_PATH = ROOT / "results.tsv"
 METRICS_PATH = ROOT / "metrics" / "latest_metrics.json"
 STRATEGY_PATH = ROOT / "strategy.py"
 PROGRAM_PATH = ROOT / "program.md"
+AGENT_LOG_PATH = ROOT / "logs" / "agent.log"
 EVOLVABLE_REGION_START = "# === EVOLVABLE REGION START ==="
 EVOLVABLE_REGION_END = "# === EVOLVABLE REGION END ==="
 IMMUTABLE_REGION_START = "# === IMMUTABLE REGION START ==="
 IMMUTABLE_REGION_END = "# === IMMUTABLE REGION END ==="
+VERIFICATION_TEST_TARGETS = ["tests/test_strategy.py", "tests/test_run_trading_agent.py"]
+CRASH_NOTES = (
+    "prepare_failed",
+    "baseline_strategy_failed",
+    "candidate_strategy_failed",
+    "git_commit_failed",
+    "pre_commit_pytest_failed",
+    "verification_pytest_failed",
+    "verification_backtest_failed",
+    "immutable_hash_failed",
+)
+REJECTED_EDIT_NOTES = (
+    "immutable_research_surface_changed",
+    "pytest_failed_after_edit",
+    "strategy_guardrails_missing",
+)
 
 
 @dataclass
@@ -99,6 +117,12 @@ def parse_metrics(path: Path) -> Dict[str, float]:
     }
 
 
+def load_metrics_payload(path: Path) -> Dict[str, object]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def best_objective(results_path: Path) -> float:
     if not results_path.exists():
         return -1e9
@@ -147,6 +171,14 @@ def append_result(
         f.write("\t".join(row) + "\n")
 
 
+def append_agent_log(event: str, message: str) -> None:
+    AGENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    line = f"{now}\t{event}\t{message.replace(chr(10), ' ')[:1000]}\n"
+    with AGENT_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def git_commit(message: str) -> str:
     add = run_cmd(["git", "add", "strategy.py", "results.tsv"])
     if not add.ok:
@@ -156,6 +188,37 @@ def git_commit(message: str) -> str:
         return ""
     rev = run_cmd(["git", "rev-parse", "--short", "HEAD"])
     return rev.stdout.strip() if rev.ok else ""
+
+
+def load_recent_results(results_path: Path, limit: int = 10) -> List[Dict[str, str]]:
+    if not results_path.exists():
+        return []
+    with results_path.open("r", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    return rows[-limit:]
+
+
+def _is_crash_note(note: str) -> bool:
+    return any(note.startswith(prefix) for prefix in CRASH_NOTES) or note.startswith("llm_error:")
+
+
+def _is_rejected_edit_note(note: str) -> bool:
+    return any(note.startswith(prefix) for prefix in REJECTED_EDIT_NOTES)
+
+
+def compute_stability_score(rows: List[Dict[str, str]], objective_improving: bool) -> float:
+    if not rows:
+        return 1.0 if objective_improving else 0.2
+
+    attempted = max(len(rows), 1)
+    successful_iters = sum(1 for row in rows if row.get("test_pass") == "1")
+    crash_count = sum(1 for row in rows if _is_crash_note(row.get("notes", "")))
+    rejected_bad_edits = sum(1 for row in rows if _is_rejected_edit_note(row.get("notes", "")))
+    success_rate = successful_iters / attempted
+    crash_rate = crash_count / attempted
+    rejection_rate = rejected_bad_edits / attempted
+    improvement_factor = 1.0 if objective_improving else 0.2
+    return success_rate * (1.0 - crash_rate) * max(rejection_rate, 0.1) * improvement_factor
 
 
 def _find_region_bounds(text: str, start_marker: str, end_marker: str) -> Tuple[int, int]:
@@ -377,6 +440,49 @@ Current strategy.py:
 """.strip()
 
 
+def run_verification_loop(current_metrics: Dict[str, float]) -> Tuple[bool, Dict[str, float], str]:
+    hash_check = run_cmd(
+        ["python", "-c", "import strategy; strategy.verify_expected_immutable_hash()"],
+        timeout_sec=30,
+    )
+    if not hash_check.ok:
+        append_agent_log("verification_failed", f"immutable_hash_failed {hash_check.stderr or hash_check.stdout}")
+        return False, current_metrics, "immutable_hash_failed"
+
+    pytest_run = run_cmd(["pytest", "-q", *VERIFICATION_TEST_TARGETS], timeout_sec=30)
+    if not pytest_run.ok:
+        append_agent_log("verification_failed", f"verification_pytest_failed {pytest_run.stderr or pytest_run.stdout}")
+        return False, current_metrics, "verification_pytest_failed"
+
+    latest_metrics = current_metrics
+    for attempt in range(1, 4):
+        strat_run = run_cmd(
+            ["python", "strategy.py", "--data-dir", "data", "--output", "metrics/latest_metrics.json"],
+            timeout_sec=30,
+        )
+        if not strat_run.ok:
+            append_agent_log(
+                "verification_failed",
+                f"verification_backtest_failed attempt={attempt} {strat_run.stderr or strat_run.stdout}",
+            )
+            return False, current_metrics, f"verification_backtest_failed:{attempt}"
+
+        payload = load_metrics_payload(METRICS_PATH)
+        test_metrics = payload.get("test_metrics", {}) if isinstance(payload, dict) else {}
+        objective = float(payload.get("objective", -1e9)) if isinstance(payload, dict) else -1e9
+        max_abs_position = float(test_metrics.get("max_abs_position", float("nan")))
+        if not math.isfinite(objective) or not math.isfinite(max_abs_position) or max_abs_position > 1.0 + 1e-9:
+            append_agent_log(
+                "verification_failed",
+                f"verification_backtest_failed attempt={attempt} objective={objective} max_abs_position={max_abs_position}",
+            )
+            return False, current_metrics, f"verification_backtest_failed:{attempt}"
+
+        latest_metrics = parse_metrics(METRICS_PATH)
+
+    return True, latest_metrics, ""
+
+
 def run_iteration(
     iteration: int,
     provider: str,
@@ -412,6 +518,8 @@ def run_iteration(
 
     current_metrics = parse_metrics(METRICS_PATH)
     best_seen = best_objective(RESULTS_PATH)
+    recent_rows = load_recent_results(RESULTS_PATH)
+    current_stability = compute_stability_score(recent_rows, objective_improving=True)
 
     program_text = PROGRAM_PATH.read_text(encoding="utf-8")
     old_code = STRATEGY_PATH.read_text(encoding="utf-8")
@@ -437,30 +545,34 @@ def run_iteration(
 
     STRATEGY_PATH.write_text(new_code, encoding="utf-8")
 
-    test_run = run_cmd(["pytest", "tests/", "-q"], timeout_sec=30)
-    if not test_run.ok:
+    verification_ok, candidate_metrics, verification_note = run_verification_loop(current_metrics)
+    if not verification_ok:
         STRATEGY_PATH.write_text(old_code, encoding="utf-8")
-        return False, current_metrics, "pytest_failed_after_edit"
+        return False, current_metrics, verification_note
 
-    strat_run = run_cmd(["python", "strategy.py", "--data-dir", "data", "--output", "metrics/latest_metrics.json"], timeout_sec=30)
-    if not strat_run.ok:
+    objective_improved = candidate_metrics["objective"] > max(best_seen, current_metrics["objective"])
+    projected_rows = recent_rows + [
+        {
+            "test_pass": "1",
+            "notes": "committed",
+        }
+    ]
+    projected_stability = compute_stability_score(projected_rows[-10:], objective_improving=objective_improved)
+
+    if projected_stability + 1e-12 < current_stability:
         STRATEGY_PATH.write_text(old_code, encoding="utf-8")
-        return False, current_metrics, "candidate_strategy_failed"
+        append_agent_log(
+            "verification_failed",
+            f"stability_score_dropped current={current_stability:.6f} projected={projected_stability:.6f}",
+        )
+        return False, candidate_metrics, "stability_score_dropped"
 
-    candidate_metrics = parse_metrics(METRICS_PATH)
-
-    if candidate_metrics["objective"] <= best_seen:
+    if not objective_improved:
         STRATEGY_PATH.write_text(old_code, encoding="utf-8")
         return False, candidate_metrics, "no_improvement"
 
-    # Required: run tests again immediately before commit.
-    pre_commit_test = run_cmd(["pytest", "tests/", "-q"], timeout_sec=30)
-    if not pre_commit_test.ok:
-        STRATEGY_PATH.write_text(old_code, encoding="utf-8")
-        return False, candidate_metrics, "pre_commit_pytest_failed"
-
     commit_hash = git_commit(
-        f"agent: improve objective to {candidate_metrics['objective']:.6f} at iter {iteration}"
+        f"agent: verified improvement to {candidate_metrics['objective']:.6f} at iter {iteration}"
     )
     if not commit_hash:
         return False, candidate_metrics, "git_commit_failed"

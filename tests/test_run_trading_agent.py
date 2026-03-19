@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 import subprocess
@@ -13,9 +14,12 @@ from run_trading_agent import (
     best_objective,
     build_candidate_strategy,
     build_prompt,
+    compute_stability_score,
     extract_code_block,
     git_commit,
+    load_recent_results,
     run_cmd,
+    run_verification_loop,
     stable_immutable_region_hash,
     validate_strategy_update,
 )
@@ -276,3 +280,82 @@ def test_build_candidate_strategy_discards_generated_immutable_changes() -> None
     assert "original header" in built
     assert "original footer" in built
     assert "pct_change" in built
+
+
+def test_load_recent_results_and_stability_score() -> None:
+    import run_trading_agent as agent
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "results.tsv"
+        path.write_text(
+            "\n".join(
+                [
+                    "timestamp\tprovider\tmodel\titeration\ttest_pass\tsharpe\tcagr\tmax_drawdown\tobjective\tgit_commit\tnotes",
+                    "t1\topenai\tm\t1\t1\t1\t1\t-0.1\t1.0\tabc\tcommitted",
+                    "t2\topenai\tm\t2\t0\t1\t1\t-0.1\t1.0\t\timmutable_research_surface_changed",
+                    "t3\topenai\tm\t3\t0\t1\t1\t-0.1\t1.0\t\tprepare_failed",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        rows = load_recent_results(path, limit=2)
+
+    assert len(rows) == 2
+    assert rows[0]["iteration"] == "2"
+    score = compute_stability_score(rows, objective_improving=True)
+    assert 0.0 <= score <= 1.0
+
+
+def test_run_verification_loop_rejects_hash_failure(monkeypatch) -> None:
+    import run_trading_agent as agent
+
+    def fake_run_cmd(cmd, timeout_sec=30):
+        return agent.CmdResult(ok=False, code=1, stdout="", stderr="hash mismatch", duration_sec=0.0)
+
+    monkeypatch.setattr(agent, "run_cmd", fake_run_cmd)
+
+    ok, metrics, note = run_verification_loop({"objective": 0.5, "sharpe": 0.2, "cagr": 0.1, "max_drawdown": -0.1})
+
+    assert not ok
+    assert note == "immutable_hash_failed"
+    assert metrics["objective"] == 0.5
+
+
+def test_run_verification_loop_accepts_three_finite_backtests(monkeypatch, tmp_path: Path) -> None:
+    import run_trading_agent as agent
+
+    metrics_path = tmp_path / "latest_metrics.json"
+    payload = {
+        "objective": 0.75,
+        "test_metrics": {
+            "sharpe": 0.7,
+            "cagr": 0.1,
+            "max_drawdown": -0.12,
+            "max_abs_position": 0.9,
+        },
+    }
+    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    calls = {"strategy": 0}
+
+    def fake_run_cmd(cmd, timeout_sec=30):
+        if cmd[:3] == ["python", "-c", "import strategy; strategy.verify_expected_immutable_hash()"]:
+            return agent.CmdResult(ok=True, code=0, stdout="", stderr="", duration_sec=0.0)
+        if cmd[:2] == ["pytest", "-q"]:
+            return agent.CmdResult(ok=True, code=0, stdout="ok", stderr="", duration_sec=0.0)
+        if cmd[:2] == ["python", "strategy.py"]:
+            calls["strategy"] += 1
+            return agent.CmdResult(ok=True, code=0, stdout="ok", stderr="", duration_sec=0.0)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(agent, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(agent, "METRICS_PATH", metrics_path)
+
+    ok, metrics, note = run_verification_loop({"objective": 0.2, "sharpe": 0.1, "cagr": 0.05, "max_drawdown": -0.1})
+
+    assert ok
+    assert note == ""
+    assert metrics["objective"] == 0.75
+    assert calls["strategy"] == 3

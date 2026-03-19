@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -15,6 +17,7 @@ EVOLVABLE_REGION_START = "# === EVOLVABLE REGION START ==="
 EVOLVABLE_REGION_END = "# === EVOLVABLE REGION END ==="
 IMMUTABLE_REGION_START = "# === IMMUTABLE REGION START ==="
 IMMUTABLE_REGION_END = "# === IMMUTABLE REGION END ==="
+EXPECTED_IMMUTABLE_HASH = "92c9b3bd3eb6adf5a180e1d809706e8132903f0ec6c74c4cdeecb3d1a5300bb0"
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,33 @@ class RiskPolicy:
 
 
 DEFAULT_RISK_POLICY = RiskPolicy()
+
+
+def _find_region_bounds_in_text(text: str, start_marker: str, end_marker: str) -> Tuple[int, int]:
+    start_match = re.search(rf"^{re.escape(start_marker)}$", text, flags=re.MULTILINE)
+    if start_match is None:
+        raise RuntimeError(f"missing start marker: {start_marker}")
+    end_match = re.search(rf"^{re.escape(end_marker)}$", text, flags=re.MULTILINE)
+    if end_match is None:
+        raise RuntimeError(f"missing end marker: {end_marker}")
+    return start_match.start(), end_match.end()
+
+
+def compute_immutable_region_hash_from_text(text: str) -> str:
+    start, end = _find_region_bounds_in_text(text, IMMUTABLE_REGION_START, IMMUTABLE_REGION_END)
+    immutable_text = text[start:end]
+    evo_start, evo_end = _find_region_bounds_in_text(immutable_text, EVOLVABLE_REGION_START, EVOLVABLE_REGION_END)
+    masked = immutable_text[:evo_start] + "<EVOLVABLE_REGION>" + immutable_text[evo_end:]
+    return hashlib.sha256(masked.encode("utf-8")).hexdigest()
+
+
+def verify_expected_immutable_hash(expected_hash: str = EXPECTED_IMMUTABLE_HASH) -> None:
+    source_text = Path(__file__).read_text(encoding="utf-8")
+    current_hash = compute_immutable_region_hash_from_text(source_text)
+    if current_hash != expected_hash:
+        raise RuntimeError(
+            f"Immutable strategy kernel hash mismatch: expected {expected_hash}, got {current_hash}"
+        )
 
 # === IMMUTABLE REGION START ===
 
@@ -234,6 +264,7 @@ def backtest(df: pd.DataFrame, params: StrategyParams, risk_policy: RiskPolicy =
         {
             "trades": guardrails["trade_count"],
             "turnover": guardrails["turnover"],
+            "max_abs_position": float(position.abs().max()),
             "mean_abs_exposure": guardrails["mean_abs_exposure"],
             "percent_active_days": guardrails["percent_active_days"],
             "average_holding_period": guardrails["average_holding_period"],
@@ -428,6 +459,7 @@ def walk_forward_validate(
 
 
 def run_strategy(data_dir: Path, output_path: Path, risk_policy: RiskPolicy = DEFAULT_RISK_POLICY) -> Dict[str, object]:
+    verify_expected_immutable_hash()
     train = read_frame(data_dir / "train")
     valid = read_frame(data_dir / "valid")
     test = read_frame(data_dir / "test")
