@@ -45,6 +45,14 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _coerce_output_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def run_cmd(cmd: List[str], timeout_sec: int = 30) -> CmdResult:
     start = time.time()
     try:
@@ -67,8 +75,8 @@ def run_cmd(cmd: List[str], timeout_sec: int = 30) -> CmdResult:
         return CmdResult(
             ok=False,
             code=124,
-            stdout=exc.stdout or "",
-            stderr=(exc.stderr or "") + f"\nTIMEOUT: exceeded {timeout_sec}s",
+            stdout=_coerce_output_text(exc.stdout),
+            stderr=_coerce_output_text(exc.stderr) + f"\nTIMEOUT: exceeded {timeout_sec}s",
             duration_sec=time.time() - start,
         )
 

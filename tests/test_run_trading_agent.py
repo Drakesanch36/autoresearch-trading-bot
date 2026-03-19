@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+import subprocess
 
 from run_trading_agent import append_result, best_objective, extract_code_block, run_cmd
 
@@ -17,6 +18,28 @@ def test_run_cmd_timeout() -> None:
     result = run_cmd(["python3", "-c", "import time; time.sleep(1)"], timeout_sec=0)
     assert not result.ok
     assert result.code == 124
+
+
+def test_run_cmd_timeout_decodes_byte_streams(monkeypatch) -> None:
+    import run_trading_agent as agent
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=["python", "strategy.py"],
+            timeout=30,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+
+    result = run_cmd(["python", "strategy.py"], timeout_sec=30)
+
+    assert not result.ok
+    assert result.code == 124
+    assert result.stdout == "partial stdout"
+    assert "partial stderr" in result.stderr
+    assert "TIMEOUT: exceeded 30s" in result.stderr
 
 
 def test_append_result_and_best_objective() -> None:
