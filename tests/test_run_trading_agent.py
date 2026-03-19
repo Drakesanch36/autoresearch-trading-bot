@@ -210,3 +210,34 @@ def test_build_candidate_strategy_splices_evolvable_snippet_into_old_code() -> N
     assert "return 1.0" in built
     assert "header" in built
     assert "footer" in built
+
+
+def test_build_candidate_strategy_splices_marked_snippet_without_immutable_region() -> None:
+    old = "\n".join(
+        [
+            IMMUTABLE_REGION_START,
+            "header",
+            EVOLVABLE_REGION_START,
+            "def generate_raw_signal(df, params):",
+            "    return 0.0",
+            EVOLVABLE_REGION_END,
+            "footer",
+            IMMUTABLE_REGION_END,
+        ]
+    )
+    snippet = "\n".join(
+        [
+            EVOLVABLE_REGION_START,
+            "def generate_raw_signal(df, params):",
+            "    return -1.0",
+            EVOLVABLE_REGION_END,
+        ]
+    )
+
+    built = build_candidate_strategy(old, snippet)
+
+    assert built.count(IMMUTABLE_REGION_START) == 1
+    assert built.count(IMMUTABLE_REGION_END) == 1
+    assert "return -1.0" in built
+    assert "header" in built
+    assert "footer" in built
